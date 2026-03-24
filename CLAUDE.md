@@ -136,17 +136,34 @@ Use **Python 3.13** via `py -3.13`. For console output with unicode, set `PYTHON
 
 ## Backtesting
 
-### Community Backtester (Prosperity 4)
-```bash
-py -3.13 -m prosperity4bt trader.py 0      # Run tutorial round
-py -3.13 -m prosperity4bt trader.py 0--2   # Run specific day
-```
+### CRITICAL: Community Backtester Is Misleading for Market Making
+The community backtester (`prosperity4bt`) default mode (`--match-trades all`) **massively over-reports PnL** for passive market-making strategies (26x in our case). It double-counts fills by letting you trade against bot-to-bot trades that happened BEFORE your algo ran.
 
-### Baseline Results (2026-03-24)
+| Mode | PnL | Reality |
+|------|-----|---------|
+| `prosperity4bt --match-trades all` | 25,420 | 26x too high |
+| `prosperity4bt --match-trades none` | 0 | Too conservative |
+| `backtesting/backtest.py` (realistic) | ~1,000 | Close to portal |
+| **Portal submission** | **979** | Ground truth |
+
+### Realistic Backtester (USE THIS)
+```bash
+py -3.13 backtesting/backtest.py                    # default (fill_rate=0.05)
+py -3.13 backtesting/backtest.py --fill-rate 0.07   # optimistic
+py -3.13 backtesting/backtest.py --no-passive        # conservative (book-cross only)
 ```
-Round 0 day -2: 6,458 XIRECs (EMERALDS: 1,919 | TOMATOES: 4,540)
-Round 0 day -1: 5,267 XIRECs (EMERALDS: 2,104 | TOMATOES: 3,163)
-Total:         11,726 XIRECs
+Simulates step-5 passive fills with calibrated probability. Tune `--fill-rate` after each portal submission to match results.
+
+### Community Backtester (use for error checking only)
+```bash
+py -3.13 -m prosperity4bt trader.py 0 --match-trades none   # safe sanity check
+py -3.13 -m prosperity4bt trader.py 0                        # optimistic upper bound ONLY
+```
+Use `--match-trades none` for sanity checks. Use default `all` mode ONLY for relative A/B comparison between strategies (not absolute PnL prediction).
+
+### Portal Submission Results
+```
+Submission 18425 (v1 code): 979 XIRECs (EMERALDS: 0 | TOMATOES: 979)
 ```
 
 ### Visualization
@@ -165,7 +182,10 @@ Total:         11,726 XIRECs
 ## Common Pitfalls
 
 - Forgetting sell_orders quantities are negative
+- **Position limit bug**: When computing passive order sizes after taking, use STARTING position (from state.position), not the locally-tracked post-take position. The exchange checks all orders against the starting position. Using post-take position over-allocates the opposite side → ALL orders cancelled.
 - Not accounting for worst-case position limit check (ALL orders, not individual)
+- **EMA-based taking loses money on drifting assets**: For trending products like TOMATOES, EMA lag causes wrong-way trades (buys falling markets, sells rising). Use pure passive quoting instead.
+- **Community backtester fills are unrealistic**: Don't trust absolute PnL from prosperity4bt for market-making. Use our realistic backtester or the portal.
 - Hardcoding values that change between rounds
 - Not persisting state properly in traderData (init called once, run called per tick)
 - Placing orders that cross your own orders (unnecessary self-trade)

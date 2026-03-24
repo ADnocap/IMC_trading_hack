@@ -1,32 +1,31 @@
 from datamodel import OrderDepth, TradingState, Order
 from typing import Dict, List
 import json
-import math
 
 
 class Trader:
     """
-    IMC Prosperity 4 Trading Algorithm
-    Tutorial Round: EMERALDS (stationary MM) + TOMATOES (adaptive MM)
+    IMC Prosperity 4 Trading Algorithm v3
+    Portal-optimized: penny-jump quoting, correct position limits, no harmful takes.
+
+    Changes from v2:
+    - Removed TOMATOES taking (backtester --match-trades none shows EMA-based takes
+      are wrong-way trades on a drifting asset: buys falling markets, sells rising)
+    - TOMATOES now uses mid-based quote cap instead of EMA (always current, no lag)
+    - EMERALDS keeps take-at-fair for spread-tightening events (known fair value)
     """
 
-    # ── Product Configuration ──────────────────────────────────────────
     PARAMS = {
         "EMERALDS": {
             "strategy": "fixed_mm",
             "fair_value": 10000,
-            "take_width": 1,       # take orders within this distance of fair value
-            "spread": 2,           # passive quote half-spread
             "limit": 80,
-            "soft_limit": 60,      # start skewing inventory beyond this
+            "soft_limit": 50,
         },
         "TOMATOES": {
             "strategy": "adaptive_mm",
-            "ema_alpha": 0.15,     # EMA smoothing (higher = more responsive)
-            "take_width": 2,       # take orders within this distance of fair value
-            "spread": 3,           # passive quote half-spread
             "limit": 80,
-            "soft_limit": 60,
+            "soft_limit": 50,
         },
     }
 
@@ -34,7 +33,6 @@ class Trader:
         result: Dict[str, List[Order]] = {}
         conversions = 0
 
-        # ── Restore persistent state ──────────────────────────────────
         trader_data = {}
         if state.traderData:
             try:
@@ -42,9 +40,8 @@ class Trader:
             except json.JSONDecodeError:
                 trader_data = {}
 
-        # ── Trade each product ────────────────────────────────────────
         for product in state.order_depths:
-            order_depth: OrderDepth = state.order_depths[product]
+            od: OrderDepth = state.order_depths[product]
             params = self.PARAMS.get(product)
             if not params:
                 result[product] = []
@@ -53,155 +50,125 @@ class Trader:
             position = state.position.get(product, 0)
 
             if params["strategy"] == "fixed_mm":
-                orders, trader_data = self.fixed_market_making(
-                    product, order_depth, position, params, trader_data
+                orders, trader_data = self._trade_fixed(
+                    product, od, position, params, trader_data
                 )
             elif params["strategy"] == "adaptive_mm":
-                orders, trader_data = self.adaptive_market_making(
-                    product, order_depth, position, params, trader_data, state
+                orders, trader_data = self._trade_adaptive(
+                    product, od, position, params, trader_data
                 )
             else:
                 orders = []
 
             result[product] = orders
 
-        traderData = json.dumps(trader_data)
-        return result, conversions, traderData
+        return result, conversions, json.dumps(trader_data)
 
-    # ── Strategy: Fixed Fair-Value Market Making ──────────────────────
-    def fixed_market_making(
-        self, product: str, od: OrderDepth, position: int,
-        params: dict, trader_data: dict
-    ) -> tuple[List[Order], dict]:
-        orders: List[Order] = []
+    def _trade_fixed(self, product, od, position, params, td):
+        """EMERALDS: penny-jump MM + take at fair value on spread tightening."""
+        orders = []
         fair = params["fair_value"]
         limit = params["limit"]
-        take_w = params["take_width"]
-        spread = params["spread"]
         soft = params["soft_limit"]
 
-        # ── Phase 1: Aggressive takes (cross mispriced orders) ────────
-        # Take cheap asks (buy)
+        if not od.buy_orders or not od.sell_orders:
+            return orders, td
+
+        best_bid = max(od.buy_orders.keys())
+        best_ask = min(od.sell_orders.keys())
+
+        starting_pos = position
+        buy_ordered = 0
+        sell_ordered = 0
+
+        # Phase 1: Take at fair value or better
+        # ~59 spread-tightening events per day (ask=10000 or bid=10000)
         for ask_price in sorted(od.sell_orders.keys()):
-            if ask_price > fair - take_w:
+            if ask_price > fair:
                 break
-            ask_vol = od.sell_orders[ask_price]  # negative
-            can_buy = limit - position
+            vol = -od.sell_orders[ask_price]
+            can_buy = limit - starting_pos - buy_ordered
             if can_buy <= 0:
                 break
-            qty = min(-ask_vol, can_buy)
+            qty = min(vol, can_buy)
             orders.append(Order(product, ask_price, qty))
-            position += qty
+            buy_ordered += qty
 
-        # Take expensive bids (sell)
         for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-            if bid_price < fair + take_w:
+            if bid_price < fair:
                 break
-            bid_vol = od.buy_orders[bid_price]  # positive
-            can_sell = limit + position
+            vol = od.buy_orders[bid_price]
+            can_sell = limit + starting_pos - sell_ordered
             if can_sell <= 0:
                 break
-            qty = min(bid_vol, can_sell)
+            qty = min(vol, can_sell)
             orders.append(Order(product, bid_price, -qty))
-            position -= qty
+            sell_ordered += qty
 
-        # ── Phase 2: Passive quotes with inventory skew ───────────────
-        skew = self._inventory_skew(position, soft, limit)
+        # Phase 2: Penny-jump passive quotes
+        effective_pos = starting_pos + buy_ordered - sell_ordered
+        skew = self._inventory_skew(effective_pos, soft, limit)
+        skew_int = int(round(skew))
 
-        bid_price = int(fair - spread + skew)
-        ask_price = int(fair + spread + skew)
+        our_bid = min(best_bid + 1, fair - 1) + skew_int
+        our_ask = max(best_ask - 1, fair + 1) + skew_int
 
-        bid_qty = limit - position
-        ask_qty = limit + position
+        if our_bid >= our_ask:
+            our_bid = fair - 1
+            our_ask = fair + 1
 
-        if bid_qty > 0:
-            orders.append(Order(product, bid_price, bid_qty))
-        if ask_qty > 0:
-            orders.append(Order(product, ask_price, -ask_qty))
+        passive_buy = limit - starting_pos - buy_ordered
+        passive_sell = limit + starting_pos - sell_ordered
 
-        return orders, trader_data
+        if passive_buy > 0:
+            orders.append(Order(product, our_bid, passive_buy))
+        if passive_sell > 0:
+            orders.append(Order(product, our_ask, -passive_sell))
 
-    # ── Strategy: Adaptive (EMA) Market Making ────────────────────────
-    def adaptive_market_making(
-        self, product: str, od: OrderDepth, position: int,
-        params: dict, trader_data: dict, state: TradingState
-    ) -> tuple[List[Order], dict]:
-        orders: List[Order] = []
+        return orders, td
+
+    def _trade_adaptive(self, product, od, position, params, td):
+        """TOMATOES: pure penny-jump MM. No taking (loses money on drifting assets)."""
+        orders = []
         limit = params["limit"]
-        take_w = params["take_width"]
-        spread = params["spread"]
         soft = params["soft_limit"]
-        alpha = params["ema_alpha"]
 
-        # Calculate current mid-price
         if not od.buy_orders or not od.sell_orders:
-            return orders, trader_data
+            return orders, td
 
         best_bid = max(od.buy_orders.keys())
         best_ask = min(od.sell_orders.keys())
         mid = (best_bid + best_ask) / 2
 
-        # Update EMA fair value
-        ema_key = f"{product}_ema"
-        if ema_key in trader_data:
-            ema = trader_data[ema_key] * (1 - alpha) + mid * alpha
-        else:
-            ema = mid
-        trader_data[ema_key] = ema
+        starting_pos = position
 
-        fair = round(ema)
+        # Pure passive: penny-jump with mid-based cap (no EMA lag issues)
+        skew = self._inventory_skew(starting_pos, soft, limit)
+        skew_int = int(round(skew))
 
-        # ── Phase 1: Aggressive takes ─────────────────────────────────
-        for ask_price in sorted(od.sell_orders.keys()):
-            if ask_price > fair - take_w:
-                break
-            ask_vol = od.sell_orders[ask_price]
-            can_buy = limit - position
-            if can_buy <= 0:
-                break
-            qty = min(-ask_vol, can_buy)
-            orders.append(Order(product, ask_price, qty))
-            position += qty
+        our_bid = min(best_bid + 1, int(mid) - 1) + skew_int
+        our_ask = max(best_ask - 1, int(mid) + 1) + skew_int
 
-        for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-            if bid_price < fair + take_w:
-                break
-            bid_vol = od.buy_orders[bid_price]
-            can_sell = limit + position
-            if can_sell <= 0:
-                break
-            qty = min(bid_vol, can_sell)
-            orders.append(Order(product, bid_price, -qty))
-            position -= qty
+        if our_bid >= our_ask:
+            our_bid = int(mid) - 1
+            our_ask = int(mid) + 1
 
-        # ── Phase 2: Passive quotes with inventory skew ───────────────
-        skew = self._inventory_skew(position, soft, limit)
+        passive_buy = limit - starting_pos
+        passive_sell = limit + starting_pos
 
-        bid_price = int(fair - spread + skew)
-        ask_price = int(fair + spread + skew)
+        if passive_buy > 0:
+            orders.append(Order(product, our_bid, passive_buy))
+        if passive_sell > 0:
+            orders.append(Order(product, our_ask, -passive_sell))
 
-        bid_qty = limit - position
-        ask_qty = limit + position
+        return orders, td
 
-        if bid_qty > 0:
-            orders.append(Order(product, bid_price, bid_qty))
-        if ask_qty > 0:
-            orders.append(Order(product, ask_price, -ask_qty))
-
-        return orders, trader_data
-
-    # ── Helpers ───────────────────────────────────────────────────────
     @staticmethod
-    def _inventory_skew(position: int, soft_limit: int, hard_limit: int) -> float:
-        """
-        Returns a price skew to discourage accumulating more inventory.
-        Positive skew = shift quotes up (discourages buying, encourages selling).
-        Negative skew = shift quotes down (discourages selling, encourages buying).
-        """
+    def _inventory_skew(position, soft_limit, hard_limit):
+        """Skew quotes to reduce inventory. Max 2 ticks at hard limit."""
         if abs(position) <= soft_limit:
-            return 0
-        # Linear skew that grows from 0 at soft_limit to -1 at hard_limit
+            return 0.0
         excess = abs(position) - soft_limit
         max_excess = hard_limit - soft_limit
-        skew_magnitude = (excess / max_excess) * 1.0
-        return -skew_magnitude if position > 0 else skew_magnitude
+        magnitude = min((excess / max_excess) * 2.0, 2.0)
+        return -magnitude if position > 0 else magnitude
