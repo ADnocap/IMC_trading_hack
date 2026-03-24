@@ -13,7 +13,17 @@
       "WebFetch(domain:www.imc.com)",
       "WebFetch(domain:gist.github.com)",
       "WebFetch(domain:fengbojun.com)",
-      "WebFetch(domain:www.piwheels.org)"
+      "WebFetch(domain:www.piwheels.org)",
+      "Bash(python analysis/tutorial_eda.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python analysis/tutorial_eda.py)",
+      "Bash(where python3.13)",
+      "Bash(py -3.13 --version)",
+      "Bash(py -3.13 analysis/tutorial_eda.py)",
+      "Bash(py -3.13 -c \"from trader import Trader; print\\(''Trader class loads OK''\\)\")",
+      "Bash(py -3.13 -m pip install jsonpickle)",
+      "Bash(PYTHONIOENCODING=utf-8 py -3.13 analysis/tutorial_eda.py)",
+      "Bash(py -3.13 -m pip install prosperity4btx)",
+      "Bash(py -3.13 -m prosperity4bt trader.py 0)"
     ]
   }
 }

@@ -130,13 +130,23 @@ PRODUCT_CONFIG = {
 }
 ```
 
+## Python Version
+
+Use **Python 3.13** via `py -3.13`. For console output with unicode, set `PYTHONIOENCODING=utf-8`.
+
 ## Backtesting
 
 ### Community Backtester (Prosperity 4)
 ```bash
-pip install prosperity4btx
-python -m prosperity4bt trader.py 0      # Run tutorial round
-python -m prosperity4bt trader.py 0--2   # Run specific day
+py -3.13 -m prosperity4bt trader.py 0      # Run tutorial round
+py -3.13 -m prosperity4bt trader.py 0--2   # Run specific day
+```
+
+### Baseline Results (2026-03-24)
+```
+Round 0 day -2: 6,458 XIRECs (EMERALDS: 1,919 | TOMATOES: 4,540)
+Round 0 day -1: 5,267 XIRECs (EMERALDS: 2,104 | TOMATOES: 3,163)
+Total:         11,726 XIRECs
 ```
 
 ### Visualization
