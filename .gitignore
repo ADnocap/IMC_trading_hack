@@ -1,1 +1,3 @@
-*/settings.local.json
+*.log
+*.pyc
+__pycache__/
